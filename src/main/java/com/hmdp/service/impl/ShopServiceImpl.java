@@ -35,26 +35,47 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      * @return
      */
     @Override
-    public Result getShopById(Long id) {
-        String shopJson = stringRedisTemplate.opsForValue().get(RedisConstants.CACHE_SHOP_KEY + id);
-        //在redis中存在(不是null、不空、不全是空白字符
-        if(StrUtil.isNotBlank(shopJson)){
-            return Result.ok(JSONUtil.toBean(shopJson,Shop.class));
-        }
-        //解决缓存穿透（为空直接返回
-        if(shopJson!=null){
-            return Result.fail("店铺信息不存在!");
+    public Result getShopById(Long id){
+        String lockKey = RedisConstants.LOCK_SHOP_KEY+id;
+        while(true) {
+            String shopJson = stringRedisTemplate.opsForValue().get(RedisConstants.CACHE_SHOP_KEY + id);
+            //在redis中存在(不是null、不空、不全是空白字符
+            if (StrUtil.isNotBlank(shopJson)) {
+                return Result.ok(JSONUtil.toBean(shopJson, Shop.class));
+            }
+            //解决缓存穿透（为空直接返回
+            if (shopJson != null) {
+                return Result.fail("店铺信息不存在!");
+            }
+
+            //解决缓存击穿，开始重建缓存
+            Boolean flag = tryLock(lockKey);
+            if(flag==true){
+               break;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
         }
         //在redis中不存在，查数据库
         Shop shop = getById(id);
-        //不在数据库中，返回错误
-        if(shop==null){
-            //解决缓存穿透（缓存null值
-            stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id,"",RedisConstants.CACHE_NULL_TTL,TimeUnit.MINUTES);
-            return Result.fail("店铺不存在");
+        try {
+            Thread.sleep(200);
+            //不在数据库中，返回错误
+            if(shop==null){
+                //解决缓存穿透（缓存null值
+                stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id,"",RedisConstants.CACHE_NULL_TTL,TimeUnit.MINUTES);
+                return Result.fail("店铺不存在");
+            }
+            //存在，写入redis
+            stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id,JSONUtil.toJsonStr(shop),RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        }catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }finally {
+            unlock(lockKey);
         }
-        //存在，写入redis
-        stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id,JSONUtil.toJsonStr(shop),RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES);
         return Result.ok(shop);
     }
 
